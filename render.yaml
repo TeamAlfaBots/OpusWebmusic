@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: cherry-music
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: SAAVN_API_BASE_URL
+        value: https://opus-saavn-api.vercel.app
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false
+      # Cloud sync (Turso). Fill these in the Render dashboard.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: SYNC_SECRET
+        generateValue: true

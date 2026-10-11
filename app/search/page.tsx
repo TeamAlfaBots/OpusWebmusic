@@ -1,70 +1,200 @@
 'use client';
-import { Heart } from 'lucide-react';
-import { ArtistLinks } from '@/components/ArtistLinks';
-import { DetailHeader } from '@/components/DetailHeader';
-import { PlayButtons } from '@/components/PlayButtons';
+import { useEffect, useRef, useState } from 'react';
+import { Search as SearchIcon, X } from 'lucide-react';
+import { MediaCard } from '@/components/MediaCard';
+import { Shelf } from '@/components/Shelf';
 import { SongList } from '@/components/SongRow';
-import { ErrorBox, RowSkeletons } from '@/components/States';
-import { getAlbum } from '@/lib/api';
+import { CardSkeletons, EmptyBox, ErrorBox, RowSkeletons } from '@/components/States';
+import { searchSongs, searchAll } from '@/lib/api';
+import { BROWSE } from '@/lib/home';
 import { useAsync } from '@/lib/hooks';
 import { useLibrary } from '@/lib/library';
-import { artistNames, bestImage, decode, smallImage, totalLabel } from '@/lib/music';
-import { useUI } from '@/lib/ui';
+import { decode, smallImage } from '@/lib/music';
+import { usePlayMedia } from '@/lib/playMedia';
+import type { AlbumLite, Song } from '@/lib/types';
 
-export default function AlbumPage({ params }: { params: { id: string } }) {
-  const { id } = params;
+type Filter = 'all' | 'songs' | 'albums' | 'artists' | 'playlists';
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: 'all', label: 'All' }, { key: 'songs', label: 'Songs' }, { key: 'albums', label: 'Albums' },
+  { key: 'artists', label: 'Artists' }, { key: 'playlists', label: 'Playlists' },
+];
+
+function albumSubtitle(a: AlbumLite): string {
+  const names = (a.artists?.primary ?? a.artists?.all ?? []).map((x) => decode(x.name)).join(', ');
+  return [a.year, names].filter(Boolean).join(' • ') || 'Album';
+}
+
+export default function SearchPage() {
   const lib = useLibrary();
-  const ui = useUI();
-  const { data, loading, error, reload } = useAsync(() => getAlbum(id), [id]);
+  const playMedia = usePlayMedia();
+  const [text, setText] = useState('');
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<Filter>('all');
+  const [extra, setExtra] = useState<Song[]>([]);
+  const [page, setPage] = useState(0);
+  const [moreBusy, setMoreBusy] = useState(false);
+  const [noMore, setNoMore] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const savedRecent = useRef('');
 
-  if (error) return <div className="page"><ErrorBox message={error} onRetry={reload} /></div>;
-  if (loading || !data) {
-    return (
-      <div className="page">
-        <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-end">
-          <div className="skeleton h-52 w-52 rounded-2xl sm:h-60 sm:w-60" />
-          <div className="w-full max-w-md"><div className="skeleton h-12 w-3/4" /><div className="skeleton mt-4 h-4 w-1/2" /></div>
-        </div>
-        <div className="mt-10"><RowSkeletons /></div>
-      </div>
-    );
-  }
+  // Start from ?q= if present (shared links).
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get('q') ?? '';
+    if (q) { setText(q); setQuery(q.trim()); }
+    else inputRef.current?.focus({ preventScroll: true });
+  }, []);
 
-  const songs = data.songs ?? [];
-  const total = songs.reduce((n, s) => n + (s.duration ?? 0), 0);
-  const saved = lib.isSaved('album', data.id);
-  const meta = [data.year, `${songs.length || data.songCount || 0} songs`, totalLabel(total)].filter(Boolean).join(' • ');
+  // Debounce typing into the actual query, and mirror it in the address bar.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const q = text.trim();
+      setQuery(q);
+      const url = q ? `/search?q=${encodeURIComponent(q)}` : '/search';
+      window.history.replaceState(window.history.state, '', url);
+    }, 350);
+    return () => window.clearTimeout(t);
+  }, [text]);
+
+  const enabled = query.length >= 2;
+  const { data, error, loading, reload } = useAsync((signal) => searchAll(query, signal), [query], enabled);
+
+  useEffect(() => { setExtra([]); setPage(0); setNoMore(false); }, [query]);
+
+  // Remember searches that actually returned something.
+  useEffect(() => {
+    if (!data || savedRecent.current === query) return;
+    if (data.songs.length || data.albums.length || data.artists.length || data.playlists.length) {
+      savedRecent.current = query;
+      lib.addRecentSearch(query);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, query]);
+
+  const loadMore = async () => {
+    setMoreBusy(true);
+    try {
+      const next = page + 1;
+      const res = await searchSongs(query, next, 20);
+      const have = new Set([...(data?.songs ?? []), ...extra].map((s) => s.id));
+      const fresh = res.results.filter((s) => !have.has(s.id));
+      setExtra((e) => [...e, ...fresh]);
+      setPage(next);
+      if (!fresh.length) setNoMore(true);
+    } catch { setNoMore(true); } finally { setMoreBusy(false); }
+  };
+
+  const allSongs = [...(data?.songs ?? []), ...extra];
+  const nothing = !!data && !allSongs.length && !data.albums.length && !data.artists.length && !data.playlists.length;
+  const show = (k: Filter) => filter === 'all' || filter === k;
+
+  const artistCards = (data?.artists ?? []).map((a) => (
+    <MediaCard key={a.id} round title={decode(a.name)} subtitle="Artist" image={smallImage(a.image)} href={`/artist/${encodeURIComponent(a.id)}`} onPlay={() => void playMedia('artist', a.id)} />
+  ));
+  const albumCards = (data?.albums ?? []).map((a) => (
+    <MediaCard key={a.id} title={a.name} subtitle={albumSubtitle(a)} image={smallImage(a.image)} href={`/album/${encodeURIComponent(a.id)}`} onPlay={() => void playMedia('album', a.id)} />
+  ));
+  const playlistCards = (data?.playlists ?? []).map((p) => (
+    <MediaCard key={p.id} title={p.name} subtitle={p.songCount ? `${p.songCount} songs` : 'Playlist'} image={smallImage(p.image)} href={`/playlist/${encodeURIComponent(p.id)}`} onPlay={() => void playMedia('playlist', p.id)} />
+  ));
 
   return (
     <div className="page">
-      <DetailHeader
-        label={data.type === 'single' ? 'Single' : 'Album'}
-        title={decode(data.name)}
-        image={bestImage(data.image)}
-        actions={
-          <>
-            <PlayButtons songs={songs} />
-            <button
-              className={`icon-btn !h-12 !w-12 border border-white/10 ${saved ? 'on' : ''}`}
-              aria-label={saved ? 'Remove album from library' : 'Save album to library'}
-              aria-pressed={saved}
-              onClick={() => {
-                const added = lib.toggleSaved({ id: data.id, kind: 'album', title: decode(data.name), subtitle: artistNames({ artists: data.artists }), image: smallImage(data.image) });
-                ui.toast(added ? 'Saved to your library' : 'Removed from your library');
-              }}
-            >
-              <Heart size={22} fill={saved ? 'currentColor' : 'none'} />
-            </button>
-          </>
-        }
-      >
-        <p className="mt-3 text-white/70"><ArtistLinks credits={data.artists} /></p>
-        <p className="mt-1 text-sm text-white/45">{meta}</p>
-      </DetailHeader>
-
-      <div className="mt-8">
-        {songs.length ? <SongList songs={songs} showIndex /> : <p className="py-10 text-center text-white/50">This album has no playable songs right now.</p>}
+      <h1 className="sr-only">Search</h1>
+      <div className="search-big">
+        <SearchIcon size={20} className="text-white/50" />
+        <input
+          ref={inputRef}
+          type="search"
+          inputMode="search"
+          enterKeyHint="search"
+          autoComplete="off"
+          aria-label="Search songs, albums, artists and playlists"
+          placeholder="Search songs, albums, artists, playlists"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        {text && <button className="icon-btn !h-8 !w-8" aria-label="Clear search" onClick={() => { setText(''); inputRef.current?.focus(); }}><X size={18} /></button>}
       </div>
+
+      {!enabled ? (
+        <div className="mt-8">
+          {query.length === 1 && <p className="mb-6 text-sm text-white/45">Keep typing — search starts from two characters.</p>}
+          {lib.recentSearches.length > 0 && (
+            <section className="mb-10">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-xl font-bold">Recent searches</h2>
+                <button className="text-sm font-semibold text-cherry-300 hover:underline" onClick={lib.clearRecentSearches}>Clear all</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {lib.recentSearches.map((r) => (
+                  <span key={r} className="chip !pr-1.5">
+                    <button onClick={() => setText(r)}>{r}</button>
+                    <button className="ml-1 rounded-full p-1 hover:bg-white/10" aria-label={`Remove ${r}`} onClick={() => lib.removeRecentSearch(r)}><X size={14} /></button>
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
+          <h2 className="mb-3 text-xl font-bold">Browse</h2>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {BROWSE.map((b) => (
+              <button key={b.name} className="genre-tile" style={{ background: `linear-gradient(135deg, ${b.from}, ${b.to})` }} onClick={() => setText(b.query)}>
+                {b.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="no-scrollbar mt-5 flex gap-2 overflow-x-auto" role="group" aria-label="Filter results">
+            {FILTERS.map((f) => (
+              <button key={f.key} className={`chip ${filter === f.key ? 'active' : ''}`} aria-pressed={filter === f.key} onClick={() => setFilter(f.key)}>{f.label}</button>
+            ))}
+          </div>
+
+          <div className="mt-6">
+            {loading && !data ? (
+              <>
+                <RowSkeletons count={6} />
+                <div className="mt-8"><CardSkeletons /></div>
+              </>
+            ) : error ? (
+              <ErrorBox message={error} onRetry={reload} />
+            ) : nothing ? (
+              <EmptyBox icon={<SearchIcon size={28} />} title={`No results for “${query}”`} hint="Check the spelling, or try a song, artist or album name." />
+            ) : data ? (
+              <div className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+                {show('songs') && allSongs.length > 0 && (
+                  <section>
+                    <h2 className="mb-2 text-xl font-bold">Songs</h2>
+                    <SongList songs={filter === 'all' ? allSongs.slice(0, 6) : allSongs} showAlbum />
+                    {filter === 'songs' && !noMore && (
+                      <div className="mt-4 flex justify-center">
+                        <button className="btn" disabled={moreBusy} onClick={() => void loadMore()}>{moreBusy ? 'Loading…' : 'Show more songs'}</button>
+                      </div>
+                    )}
+                  </section>
+                )}
+                {show('artists') && artistCards.length > 0 && (
+                  <div className="mt-9">
+                    {filter === 'all' ? <Shelf title="Artists">{artistCards}</Shelf> : <div className="grid-cards">{artistCards}</div>}
+                  </div>
+                )}
+                {show('albums') && albumCards.length > 0 && (
+                  <div className="mt-9">
+                    {filter === 'all' ? <Shelf title="Albums">{albumCards}</Shelf> : <div className="grid-cards">{albumCards}</div>}
+                  </div>
+                )}
+                {show('playlists') && playlistCards.length > 0 && (
+                  <div className="mt-9">
+                    {filter === 'all' ? <Shelf title="Playlists">{playlistCards}</Shelf> : <div className="grid-cards">{playlistCards}</div>}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </>
+      )}
     </div>
   );
 }
